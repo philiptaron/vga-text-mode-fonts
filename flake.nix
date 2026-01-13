@@ -15,9 +15,63 @@
       pkgs = nixpkgs.legacyPackages.${system};
       lib = nixpkgs.lib;
 
-      # Recursively find all font files in a directory
-      # Skip files with characters that are illegal in Nix store paths
-      hasIllegalChars = name: builtins.match ".*[#'\"\\$ &].*" name != null;
+      # Sanitize a filename to be valid for Nix store paths
+      sanitizeFileName = name:
+        let
+          # Replace problematic characters with underscore
+          cleaned = builtins.replaceStrings
+            ["#" "'" "\"" "$" " " "&" "~" "!" "@" "%" "^" "*" "(" ")" "+" "=" "[" "]" "{" "}" "|" "\\" ":" ";" "<" ">" "," "?"]
+            ["_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_"]
+            name;
+        in cleaned;
+
+      # Create a derivation that copies all fonts with sanitized names
+      sanitizedFonts = pkgs.runCommand "sanitized-fonts" {
+        nativeBuildInputs = [ pkgs.python3 ];
+      } ''
+        mkdir -p $out
+        ${pkgs.python3}/bin/python3 << 'PYTHON'
+        import os
+        import shutil
+
+        src_dir = "${./FONTS}"
+        dst_dir = os.environ["out"]
+
+        # Characters to replace with underscore
+        bad_chars = set("#'\"$ &~!@%^*()+=[]{}|\\:;<>,?")
+
+        def sanitize(name):
+            return "".join("_" if c in bad_chars else c for c in name)
+
+        for root, dirs, files in os.walk(src_dir):
+            for f in files:
+                if f.endswith((".F08", ".F14", ".F16")):
+                    src_path = os.path.join(root, f)
+                    rel_path = os.path.relpath(src_path, src_dir)
+                    sanitized_path = sanitize(rel_path)
+                    dst_path = os.path.join(dst_dir, sanitized_path)
+                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                    shutil.copy2(src_path, dst_path)
+        PYTHON
+      '';
+
+      # Recursively find all font files in the sanitized fonts directory
+      # This is evaluated at build time, so we need to use the derivation output
+      findFontsInDir = dir:
+        let
+          contents = builtins.readDir dir;
+          processEntry = name: type:
+            let path = dir + "/${name}"; in
+            if type == "directory" then
+              findFontsInDir path
+            else if type == "regular" && (lib.hasSuffix ".F08" name || lib.hasSuffix ".F14" name || lib.hasSuffix ".F16" name) then
+              [{ inherit name path; baseName = lib.removeSuffix ".F08" (lib.removeSuffix ".F14" (lib.removeSuffix ".F16" name)); }]
+            else
+              [];
+        in
+        lib.flatten (lib.mapAttrsToList processEntry contents);
+
+      # Find fonts directly from ./FONTS but sanitize for grouping
       findFonts = dir:
         let
           contents = builtins.readDir dir;
@@ -25,10 +79,18 @@
             let path = dir + "/${name}"; in
             if type == "directory" then
               findFonts path
-            else if type == "regular"
-                 && (lib.hasSuffix ".F08" name || lib.hasSuffix ".F14" name || lib.hasSuffix ".F16" name)
-                 && !(hasIllegalChars name) then
-              [{ inherit name path; baseName = lib.removeSuffix ".F08" (lib.removeSuffix ".F14" (lib.removeSuffix ".F16" name)); }]
+            else if type == "regular" && (lib.hasSuffix ".F08" name || lib.hasSuffix ".F14" name || lib.hasSuffix ".F16" name) then
+              let
+                sanitizedName = sanitizeFileName name;
+                relPath = lib.removePrefix (toString ./FONTS + "/") (toString path);
+                sanitizedRelPath = sanitizeFileName relPath;
+              in
+              [{
+                inherit name path;
+                sanitizedName = sanitizedName;
+                sanitizedPath = sanitizedRelPath;
+                baseName = lib.removeSuffix ".F08" (lib.removeSuffix ".F14" (lib.removeSuffix ".F16" (sanitizeFileName name)));
+              }]
             else
               [];
         in
@@ -37,31 +99,39 @@
       # All font files found
       allFonts = findFonts ./FONTS;
 
-      # Group fonts by base name (without extension) and relative path
-      # This lets us find matching .F08/.F14/.F16 sets
+      # Group fonts by sanitized base name (without extension) and relative path
       fontsByBase = lib.groupBy (f:
         let
           relPath = lib.removePrefix (toString ./FONTS + "/") (toString f.path);
-          dirPath = builtins.dirOf relPath;
+          sanitizedRelPath = sanitizeFileName relPath;
+          dirPath = builtins.dirOf sanitizedRelPath;
         in
         if dirPath == "." then f.baseName else "${dirPath}/${f.baseName}"
       ) allFonts;
 
       # Build a SeaVGABIOS with custom fonts
+      # Uses the sanitizedFonts derivation to get files with safe names
       mkVgaBios = { name, font16 ? null, font14 ? null, font08 ? null }:
         let
-          font08Cmd = if font08 != null
-            then "xxd -i ${font08} | sed 's/unsigned char [^[]*\\[\\]/u8 vgafont8[256 * 8] VAR16/'"
+          # Reference fonts from the sanitized fonts derivation
+          font08Path = if font08 != null then "${sanitizedFonts}/${font08}" else null;
+          font14Path = if font14 != null then "${sanitizedFonts}/${font14}" else null;
+          font16Path = if font16 != null then "${sanitizedFonts}/${font16}" else null;
+
+          font08Cmd = if font08Path != null
+            then "xxd -i ${font08Path} | sed 's/unsigned char [^[]*\\[\\]/u8 vgafont8[256 * 8] VAR16/'"
             else "echo 'u8 vgafont8[256 * 8] VAR16 = {0};'";
-          font14Cmd = if font14 != null
-            then "xxd -i ${font14} | sed 's/unsigned char [^[]*\\[\\]/u8 vgafont14[256 * 14] VAR16/'"
+          font14Cmd = if font14Path != null
+            then "xxd -i ${font14Path} | sed 's/unsigned char [^[]*\\[\\]/u8 vgafont14[256 * 14] VAR16/'"
             else "echo 'u8 vgafont14[256 * 14] VAR16 = {0};'";
-          font16Cmd = if font16 != null
-            then "xxd -i ${font16} | sed 's/unsigned char [^[]*\\[\\]/u8 vgafont16[256 * 16] VAR16/'"
+          font16Cmd = if font16Path != null
+            then "xxd -i ${font16Path} | sed 's/unsigned char [^[]*\\[\\]/u8 vgafont16[256 * 16] VAR16/'"
             else "echo 'u8 vgafont16[256 * 16] VAR16 = {0};'";
+
+          safeName = lib.toLower (lib.replaceStrings ["/"] ["-"] name);
         in
         pkgs.stdenv.mkDerivation {
-          pname = "vgabios-virtio-${lib.toLower (lib.replaceStrings ["/"] ["-"] name)}";
+          pname = "vgabios-virtio-${safeName}";
           version = "0.0.1";
 
           src = seabios;
@@ -129,13 +199,20 @@
           font16 = getFont ".F16";
           # Only build if we have at least one font
           hasFont = font08 != null || font14 != null || font16 != null;
+          # Get sanitized relative paths for the fonts
+          getSanitizedPath = f:
+            if f != null then
+              let
+                relPath = lib.removePrefix (toString ./FONTS + "/") (toString f.path);
+              in sanitizeFileName relPath
+            else null;
         in
         if hasFont then
           mkVgaBios {
             name = baseName;
-            font08 = if font08 != null then font08.path else null;
-            font14 = if font14 != null then font14.path else null;
-            font16 = if font16 != null then font16.path else null;
+            font08 = getSanitizedPath font08;
+            font14 = getSanitizedPath font14;
+            font16 = getSanitizedPath font16;
           }
         else
           null;
@@ -144,8 +221,8 @@
       vgaBiosPackages = lib.filterAttrs (_: v: v != null)
         (lib.mapAttrs mkFontBios fontsByBase);
 
-      # Convert package names to valid Nix attribute names and store paths
-      sanitizeName = name: lib.replaceStrings ["/"] ["-"] (lib.toLower (builtins.replaceStrings ["#" "'" " " "!" "@" "$" "%" "^" "&" "*" "(" ")" "+" "=" "[" "]" "{" "}" "|" "\\" ":" ";" "\"" "<" ">" "," "?"] ["_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_"] name));
+      # Convert package names to valid Nix attribute names
+      sanitizeName = name: lib.replaceStrings ["/"] ["-"] (lib.toLower name);
       vgaBiosPackagesSanitized = lib.mapAttrs' (name: value:
         lib.nameValuePair (sanitizeName name) value
       ) vgaBiosPackages;
@@ -337,7 +414,7 @@
 
     in {
       packages.${system} = {
-        inherit preview fontTestBoot allImages;
+        inherit preview fontTestBoot allImages sanitizedFonts;
         vm = vmScript;
         default = preview;
       } // vgaBiosPackagesSanitized // vgaBiosImagePackagesSanitized;
