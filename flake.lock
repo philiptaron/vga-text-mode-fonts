@@ -18,7 +18,24 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "seabios": "seabios"
+      }
+    },
+    "seabios": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1754522132,
+        "narHash": "sha256-hObHP58wDjeDG9rGzM0igqkp4h3w1xxMjRQwUAtkwac=",
+        "ref": "refs/heads/master",
+        "rev": "0026c353eb4e220af29750fcf000d48faf8d4ab3",
+        "revCount": 2713,
+        "type": "git",
+        "url": "https://git.seabios.org/seabios.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://git.seabios.org/seabios.git"
       }
     }
   },
