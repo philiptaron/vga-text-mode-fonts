@@ -16,6 +16,8 @@
       lib = nixpkgs.lib;
 
       # Recursively find all font files in a directory
+      # Skip files with characters that are illegal in Nix store paths
+      hasIllegalChars = name: builtins.match ".*[#'\"\\$ &].*" name != null;
       findFonts = dir:
         let
           contents = builtins.readDir dir;
@@ -23,7 +25,9 @@
             let path = dir + "/${name}"; in
             if type == "directory" then
               findFonts path
-            else if type == "regular" && (lib.hasSuffix ".F08" name || lib.hasSuffix ".F14" name || lib.hasSuffix ".F16" name) then
+            else if type == "regular"
+                 && (lib.hasSuffix ".F08" name || lib.hasSuffix ".F14" name || lib.hasSuffix ".F16" name)
+                 && !(hasIllegalChars name) then
               [{ inherit name path; baseName = lib.removeSuffix ".F08" (lib.removeSuffix ".F14" (lib.removeSuffix ".F16" name)); }]
             else
               [];
@@ -140,8 +144,8 @@
       vgaBiosPackages = lib.filterAttrs (_: v: v != null)
         (lib.mapAttrs mkFontBios fontsByBase);
 
-      # Convert package names to valid Nix attribute names
-      sanitizeName = name: lib.replaceStrings ["/"] ["-"] (lib.toLower name);
+      # Convert package names to valid Nix attribute names and store paths
+      sanitizeName = name: lib.replaceStrings ["/"] ["-"] (lib.toLower (builtins.replaceStrings ["#" "'" " " "!" "@" "$" "%" "^" "&" "*" "(" ")" "+" "=" "[" "]" "{" "}" "|" "\\" ":" ";" "\"" "<" ">" "," "?"] ["_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_" "_"] name));
       vgaBiosPackagesSanitized = lib.mapAttrs' (name: value:
         lib.nameValuePair (sanitizeName name) value
       ) vgaBiosPackages;
