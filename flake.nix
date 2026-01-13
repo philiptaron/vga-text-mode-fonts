@@ -236,6 +236,14 @@
         lib.nameValuePair "${sanitizeName name}-img" value
       ) vgaBiosImagePackages;
 
+      # Combined derivation with all images in a directory
+      allImages = pkgs.runCommand "vgabios-all-images" {} ''
+        mkdir -p $out
+        ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: img:
+          "ln -s ${img} $out/${sanitizeName name}.png"
+        ) vgaBiosImagePackages)}
+      '';
+
       # Build the NixOS VM
       vm = nixpkgs.lib.nixosSystem {
         inherit system;
@@ -325,7 +333,7 @@
 
     in {
       packages.${system} = {
-        inherit preview fontTestBoot;
+        inherit preview fontTestBoot allImages;
         vm = vmScript;
         default = preview;
       } // vgaBiosPackagesSanitized // vgaBiosImagePackagesSanitized;
